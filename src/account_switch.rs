@@ -585,6 +585,68 @@ fn copy_login(from: &Path, to: &Path) -> Result<(), String> {
     atomic_write(to, &bytes)
 }
 
+type McpLogins = serde_json::Map<String, Value>;
+
+fn mcp_logins(credentials: &Value) -> McpLogins {
+    credentials
+        .get("mcpOAuth")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Adds `from` into `into`, keeping whichever copy of a server's login expires
+/// later (the most recently refreshed one). On a tie `from` wins.
+fn merge_mcp_logins(into: &mut McpLogins, from: &McpLogins) {
+    let expiry = |entry: &Value| entry.get("expiresAt").and_then(Value::as_i64).unwrap_or(0);
+    for (server, entry) in from {
+        if into
+            .get(server)
+            .is_none_or(|current| expiry(entry) >= expiry(current))
+        {
+            into.insert(server.clone(), entry.clone());
+        }
+    }
+}
+
+/// The target's credentials with MCP server logins carried over: MCP servers
+/// are tied to this PC's setup, not to one Claude account, so signing in to
+/// one from any account must keep working after a switch.
+fn credentials_with_shared_mcp(
+    target: &Path,
+    outgoing: Option<&Path>,
+    others: &[PathBuf],
+) -> Result<Vec<u8>, String> {
+    let bytes = std::fs::read(target).map_err(|e| e.to_string())?;
+    let Ok(mut credentials) = serde_json::from_slice::<Value>(&bytes) else {
+        return Ok(bytes);
+    };
+    let read = |path: &Path| {
+        std::fs::read(path)
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+            .map(|v| mcp_logins(&v))
+    };
+    let mut merged = McpLogins::new();
+    for path in others {
+        if let Some(logins) = read(path) {
+            merge_mcp_logins(&mut merged, &logins);
+        }
+    }
+    merge_mcp_logins(&mut merged, &mcp_logins(&credentials));
+    if let Some(logins) = outgoing.and_then(read) {
+        merge_mcp_logins(&mut merged, &logins);
+    }
+    let Some(object) = credentials.as_object_mut() else {
+        return Ok(bytes);
+    };
+    if merged.is_empty() {
+        return Ok(bytes);
+    }
+    object.insert("mcpOAuth".into(), Value::Object(merged));
+    serde_json::to_vec(&credentials).map_err(|e| e.to_string())
+}
+
 /// Makes `accounts.profiles[target]` the single signed-in account of
 /// `~/.claude`, which running Claude Code sessions and new terminals share.
 ///
@@ -696,7 +758,15 @@ fn swap_files(
         backup_once(live_credentials);
         backup_once(global);
         let outgoing = std::fs::read(live_credentials).ok();
-        copy_login(&target_credentials, live_credentials)
+        let others: Vec<PathBuf> = accounts
+            .profiles
+            .iter()
+            .filter_map(profile_directory)
+            .map(|directory| directory.join(".credentials.json"))
+            .filter(|path| *path != target_credentials)
+            .collect();
+        credentials_with_shared_mcp(&target_credentials, Some(live_credentials), &others)
+            .and_then(|bytes| atomic_write(live_credentials, &bytes))
             .map_err(|e| format!("Could not install the new login: {e}"))?;
         if let Err(error) = write_oauth_account(global, &target_account) {
             // Never leave new tokens next to the old account's identity.
@@ -1282,6 +1352,44 @@ mod tests {
         );
         assert_eq!(format_reset(at(30 * 3600)).as_deref(), Some("1d 6h"));
         assert_eq!(format_reset(None), None);
+    }
+
+    #[test]
+    fn mcp_logins_follow_the_switch_and_the_newest_copy_wins() {
+        let root = tempfile::tempdir().unwrap();
+        let live = root.path().join("live");
+        write_login(&live, "live@x.com", "ignored");
+        let creds = |email_token: &str, mcp: Value| {
+            serde_json::json!({"claudeAiOauth": {"accessToken": email_token}, "mcpOAuth": mcp})
+                .to_string()
+        };
+        std::fs::write(
+            live.join(".credentials.json"),
+            creds("LIVE", serde_json::json!({"supabase": {"expiresAt": 300, "t": "live-new"}, "github": {"expiresAt": 10, "t": "gh"}})),
+        )
+        .unwrap();
+        let global = root.path().join("global.json");
+        std::fs::write(&global, r#"{"oauthAccount":{"emailAddress":"live@x.com"}}"#).unwrap();
+        write_login(&root.path().join("work"), "work@x.com", "x");
+        std::fs::write(
+            root.path().join("work/.credentials.json"),
+            creds(
+                "WORK",
+                serde_json::json!({"supabase": {"expiresAt": 100, "t": "work-old"}}),
+            ),
+        )
+        .unwrap();
+        let mut accounts = crate::accounts::ProviderAccounts {
+            profiles: vec![profile(root.path(), "work")],
+            ..Default::default()
+        };
+        let credentials = live.join(".credentials.json");
+        swap_files(&credentials, &global, &mut accounts, 0).unwrap();
+        let installed: Value =
+            serde_json::from_slice(&std::fs::read(&credentials).unwrap()).unwrap();
+        assert_eq!(installed["claudeAiOauth"]["accessToken"], "WORK");
+        assert_eq!(installed["mcpOAuth"]["supabase"]["t"], "live-new");
+        assert_eq!(installed["mcpOAuth"]["github"]["t"], "gh");
     }
 
     #[test]
