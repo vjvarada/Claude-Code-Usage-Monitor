@@ -2994,6 +2994,14 @@ fn do_poll_once(hwnd: HWND) {
                 }),
                 Err(error) => diagnose::log_error("unable to save usage cache", error),
             }
+            let suggestion =
+                crate::account_switch::announce_once(crate::account_switch::suggest_switch(
+                    &accounts.claude.profiles,
+                    &cache_data.accounts,
+                ));
+            if let Some(suggestion) = suggestion {
+                tray_icon::notify_balloon(hwnd, &suggestion.title, &suggestion.body);
+            }
             if !notifications.is_empty() {
                 let body = notifications
                     .iter()
@@ -3448,6 +3456,7 @@ mod taskbar_collision;
 use positioning::*;
 mod mouse;
 use mouse::*;
+mod account_menu_draw;
 mod window_context_menu;
 use window_context_menu::*;
 

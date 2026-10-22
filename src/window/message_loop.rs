@@ -37,6 +37,8 @@ pub(super) unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_NCHITTEST => LRESULT(HTCLIENT as isize),
+        WM_MEASUREITEM if account_menu_draw::handle_measure(hwnd, lparam) => LRESULT(1),
+        WM_DRAWITEM if account_menu_draw::handle_draw(hwnd, lparam) => LRESULT(1),
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let _ = BeginPaint(hwnd, &mut ps);

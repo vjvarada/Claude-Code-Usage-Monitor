@@ -76,6 +76,9 @@ pub struct ProviderAccounts {
     pub selected: String,
     /// Retain retired IDs so existing theme bindings never target a new account.
     pub used_ids: std::collections::BTreeSet<String>,
+    /// Set after the first live account switch: the active account's tokens
+    /// then live in `~/.claude` and every other account keeps its own folder.
+    pub live_swap: bool,
 }
 
 impl Default for ProviderAccounts {
@@ -84,6 +87,7 @@ impl Default for ProviderAccounts {
             profiles: vec![AccountProfile::default()],
             selected: "default".into(),
             used_ids: ["default".into()].into(),
+            live_swap: false,
         }
     }
 }

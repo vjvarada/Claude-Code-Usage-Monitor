@@ -91,7 +91,19 @@ where
     for provider in enabled.iter() {
         if let Some(accounts) = settings.get(provider) {
             for profile in accounts.profiles.iter().filter(|profile| profile.enabled) {
-                let path = profile.credential_path(provider).map(|path| {
+                // After a live switch the active account's tokens live in
+                // ~/.claude. Polling its saved copy would refresh (and so
+                // revoke) the token the running Claude Code session holds.
+                let live_path = (provider == ProviderId::Claude
+                    && accounts.live_swap
+                    && crate::account_switch::is_live_profile(profile))
+                .then(crate::account_switch::live_credentials_path)
+                .flatten();
+                let path = match live_path {
+                    Some(path) => Ok(Some(path)),
+                    None => profile.credential_path(provider),
+                }
+                .map(|path| {
                     path.or_else(|| match provider {
                         ProviderId::Codex => codex::codex_auth_path(),
                         ProviderId::Claude => crate::accounts::environment_directory(provider)

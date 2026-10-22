@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod account_switch;
 mod accounts;
 mod app_settings;
 mod context_menu;

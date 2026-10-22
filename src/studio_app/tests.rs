@@ -439,6 +439,7 @@ fn app_with_surfaces(surfaces: Vec<SceneObject>) -> StudioApp {
         settings: SettingsFile::default(),
         synced_poll_interval_ms: SettingsFile::default().poll_interval_ms,
         synced_taskbar_lock: false,
+        synced_accounts: Default::default(),
         poll_interval_editor_generation: 0,
         startup_enabled: false,
         theme,
@@ -793,6 +794,25 @@ fn context_menu_frequency_replaces_custom_dashboard_value_and_edit_buffer() {
     assert_eq!(app.settings.poll_interval_ms, POLL_5_MIN);
     assert_eq!(app.poll_interval_editor_generation, 1);
     assert!(app.settings.usage_countdown);
+}
+
+#[test]
+fn accounts_switched_from_the_widget_menu_replace_the_dashboard_copy_unless_edited() {
+    let mut app = app_with_surfaces(vec![root("main")]);
+    let mut switched = crate::accounts::AccountSettings::default();
+    switched.claude.live_swap = true;
+    switched.claude.selected = "account_1".into();
+
+    app.sync_accounts(&switched);
+    assert_eq!(app.settings.accounts, switched);
+
+    // A pending local edit is kept; the menu's change is remembered as synced.
+    app.settings.accounts.claude.profiles[0].name = "Renamed".into();
+    let mut newer = switched.clone();
+    newer.claude.selected = "default".into();
+    app.sync_accounts(&newer);
+    assert_eq!(app.settings.accounts.claude.profiles[0].name, "Renamed");
+    assert_eq!(app.synced_accounts, newer);
 }
 
 #[test]

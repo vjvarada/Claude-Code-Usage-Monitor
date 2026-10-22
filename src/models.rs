@@ -299,12 +299,19 @@ impl AppUsageData {
                 .ok()
                 .flatten()
                 .or_else(|| crate::accounts::default_credential_path(account.provider));
+            let live = account.provider == ProviderId::Claude
+                && crate::account_switch::is_live_profile(&account.profile)
+                && account.source_path.as_deref()
+                    == crate::account_switch::live_credentials_path().as_deref();
             let changed = match &account.source_path {
                 Some(path) => {
-                    expected.as_ref().is_none_or(|expected| {
-                        crate::accounts::source_key(expected) != crate::accounts::source_key(path)
-                    }) || crate::poller::account_source_signature(account.provider, path)
-                        != account.source_signature
+                    (!live
+                        && expected.as_ref().is_none_or(|expected| {
+                            crate::accounts::source_key(expected)
+                                != crate::accounts::source_key(path)
+                        }))
+                        || crate::poller::account_source_signature(account.provider, path)
+                            != account.source_signature
                 }
                 None => crate::accounts::environment_directory(account.provider).is_some(),
             };

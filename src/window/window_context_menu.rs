@@ -18,10 +18,12 @@ pub(super) fn show_context_menu_document(
         .unwrap_or_else(localization::detect_system_language);
     let data_context = context_menu_data_context(origin.as_ref());
     let mut actions = Vec::new();
+    let mut account_ids = Vec::new();
     unsafe {
         let Ok(menu) = CreatePopupMenu() else {
             return;
         };
+        append_account_menu(menu, &mut account_ids);
         append_context_menu_items(
             menu,
             &document.items,
@@ -44,12 +46,136 @@ pub(super) fn show_context_menu_document(
         )
         .0 as usize;
         let _ = DestroyMenu(menu);
-        if selected >= 1_000 {
+        if selected >= ACCOUNT_MENU_BASE {
+            if let Some(id) = account_ids.get(selected - ACCOUNT_MENU_BASE).cloned() {
+                switch_account_from_menu(hwnd, id);
+            }
+        } else if selected >= 1_000 {
             if let Some(action) = actions.get(selected - 1_000).cloned() {
                 execute_context_menu_action(hwnd, action, origin);
             }
         }
     }
+}
+
+/// Command ids at and above this value select an account, not a menu action.
+const ACCOUNT_MENU_BASE: usize = 5_000;
+
+/// Claude accounts with their usage, checked on the one that VS Code and
+/// terminals currently use. Built from live state, so it works with any menu
+/// document or theme.
+unsafe fn append_account_menu(menu: HMENU, ids: &mut Vec<String>) {
+    use super::account_menu_draw::{register, AccountRow, Window};
+    let window = |section: &crate::models::UsageSection| {
+        section.available.then(|| Window {
+            percentage: section.percentage,
+            reset: crate::account_switch::format_reset(section.resets_at),
+        })
+    };
+    let rows: Vec<(String, AccountRow, bool)> = {
+        let state = lock_state();
+        let Some(state) = state.as_ref() else {
+            return;
+        };
+        if !state.providers.contains(ProviderId::Claude) {
+            return;
+        }
+        let profiles = &state.accounts.claude.profiles;
+        let live = crate::account_switch::live_profile_index(profiles);
+        profiles
+            .iter()
+            .enumerate()
+            .filter(|(_, profile)| profile.enabled)
+            .map(|(index, profile)| {
+                let account = state.data.as_ref().and_then(|data| {
+                    data.accounts.iter().find(|account| {
+                        account.provider == ProviderId::Claude
+                            && account.profile.same_source(profile)
+                    })
+                });
+                let usage = account.and_then(|account| account.usage.as_ref());
+                let note = match (usage, account.map(|account| account.error)) {
+                    (Some(_), _) => None,
+                    (None, Some(Some(_))) => Some("sign-in needed".to_string()),
+                    _ => Some("waiting for usage".to_string()),
+                };
+                let is_live = live == Some(index);
+                let can_switch =
+                    crate::account_switch::profile_directory(profile).is_some() || is_live;
+                (
+                    profile.id.clone(),
+                    AccountRow {
+                        name: profile.name.clone(),
+                        session: usage.and_then(|usage| window(&usage.session)),
+                        weekly: usage.and_then(|usage| window(&usage.weekly)),
+                        note,
+                        live: is_live,
+                    },
+                    can_switch,
+                )
+            })
+            .collect()
+    };
+    if rows.is_empty() {
+        return;
+    }
+    let header = native_interop::wide_str("Claude accounts \u{2013} click to switch");
+    let _ = AppendMenuW(menu, MF_GRAYED, 0, PCWSTR::from_raw(header.as_ptr()));
+    let item_data = register(rows.iter().map(|(_, row, _)| row.clone()).collect());
+    for ((id, _, can_switch), data) in rows.into_iter().zip(item_data) {
+        let mut flags = MF_OWNERDRAW;
+        if !can_switch {
+            flags |= MF_GRAYED;
+        }
+        let command = ACCOUNT_MENU_BASE + ids.len();
+        let _ = AppendMenuW(menu, flags, command, PCWSTR(data as *const u16));
+        ids.push(id);
+    }
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+}
+
+/// Swaps the live account off the UI thread (it touches files and the
+/// registry), then tells the monitor to reload so usage and checks refresh.
+fn switch_account_from_menu(hwnd: HWND, profile_id: String) {
+    let window = hwnd.0 as isize;
+    std::thread::spawn(move || {
+        let mut settings = load_settings();
+        let result = settings
+            .accounts
+            .claude
+            .profiles
+            .iter()
+            .position(|profile| profile.id == profile_id)
+            .ok_or_else(|| "Account not found".to_string())
+            .and_then(|index| {
+                crate::account_switch::swap_live_account(&mut settings.accounts.claude, index)
+            });
+        match result {
+            Ok(message) => {
+                diagnose::log(format!("account switched from menu: {message}"));
+                save_settings_or_log(&settings, "unable to save accounts after switching");
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(HWND(window as *mut _)),
+                        WM_APP_SETTINGS_UPDATED,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+            }
+            Err(error) => unsafe {
+                let text = native_interop::wide_str(&format!("Could not switch account: {error}"));
+                let title = native_interop::wide_str("Usage Monitor");
+                let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                    None,
+                    PCWSTR::from_raw(text.as_ptr()),
+                    PCWSTR::from_raw(title.as_ptr()),
+                    windows::Win32::UI::WindowsAndMessaging::MB_OK
+                        | windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+                );
+            },
+        }
+    });
 }
 
 pub(super) fn context_menu_data_context(origin: Option<&(usize, String)>) -> DataContext {
