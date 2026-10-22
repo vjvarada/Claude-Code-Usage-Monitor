@@ -660,7 +660,13 @@ pub fn swap_live_account(
     let live_credentials = live_credentials_path().ok_or("Cannot locate your user folder")?;
     let global = live_global_config().ok_or("Cannot locate your user folder")?;
     let environment_was_set = active_directory().is_some();
-    let (name, already_live) = swap_files(&live_credentials, &global, accounts, target)?;
+    let (name, already_live) = swap_files(
+        &live_credentials,
+        &global,
+        accounts,
+        target,
+        suggested_directory,
+    )?;
     // One source of truth: no folder override for terminals or editors.
     let report = activate(None);
     let mut text = if already_live {
@@ -694,6 +700,7 @@ fn swap_files(
     global: &Path,
     accounts: &mut crate::accounts::ProviderAccounts,
     target: usize,
+    new_directory: impl Fn(&str) -> String,
 ) -> Result<(String, bool), String> {
     let target_profile = accounts
         .profiles
@@ -744,7 +751,7 @@ fn swap_files(
                         .clone()
                         .unwrap_or_else(|| "Previous login".into());
                     profile.enabled = true;
-                    profile.config_dir = suggested_directory(&profile.id);
+                    profile.config_dir = new_directory(&profile.id);
                     profile_directory(profile).ok_or("Cannot save current login")?
                 }
             };
@@ -1138,7 +1145,10 @@ mod tests {
         };
         let credentials = live.join(".credentials.json");
 
-        let (name, already) = swap_files(&credentials, &global, &mut accounts, 0).unwrap();
+        let (name, already) = swap_files(&credentials, &global, &mut accounts, 0, |id| {
+            root.path().join(id).to_string_lossy().into_owned()
+        })
+        .unwrap();
         assert_eq!((name.as_str(), already), ("work", false));
         // Target installed, outgoing (rotated) token saved over the stale copy.
         assert_eq!(std::fs::read_to_string(&credentials).unwrap(), "WORK-TOKEN");
@@ -1158,13 +1168,19 @@ mod tests {
         assert!(live.join(".credentials.json.usage-monitor.bak").exists());
 
         // Switching to the already-live account changes nothing.
-        let (_, already) = swap_files(&credentials, &global, &mut accounts, 0).unwrap();
+        let (_, already) = swap_files(&credentials, &global, &mut accounts, 0, |id| {
+            root.path().join(id).to_string_lossy().into_owned()
+        })
+        .unwrap();
         assert!(already);
         assert_eq!(std::fs::read_to_string(&credentials).unwrap(), "WORK-TOKEN");
 
         // Round trip: the work token rotated while live and must be kept.
         std::fs::write(&credentials, "WORK-ROTATED").unwrap();
-        swap_files(&credentials, &global, &mut accounts, 1).unwrap();
+        swap_files(&credentials, &global, &mut accounts, 1, |id| {
+            root.path().join(id).to_string_lossy().into_owned()
+        })
+        .unwrap();
         assert_eq!(
             std::fs::read_to_string(&credentials).unwrap(),
             "LIVE-ROTATED"
@@ -1192,7 +1208,14 @@ mod tests {
             ..Default::default()
         };
         // The Default profile is the live account; it must stop duplicating it.
-        swap_files(&live.join(".credentials.json"), &global, &mut accounts, 1).unwrap();
+        swap_files(
+            &live.join(".credentials.json"),
+            &global,
+            &mut accounts,
+            1,
+            |id| root.path().join(id).to_string_lossy().into_owned(),
+        )
+        .unwrap();
         let saved = accounts
             .profiles
             .iter()
@@ -1228,9 +1251,23 @@ mod tests {
         };
         let credentials = live.join(".credentials.json");
         for index in 0..3 {
-            assert!(swap_files(&credentials, &global, &mut accounts, index).is_err());
+            assert!(
+                swap_files(&credentials, &global, &mut accounts, index, |id| root
+                    .path()
+                    .join(id)
+                    .to_string_lossy()
+                    .into_owned())
+                .is_err()
+            );
         }
-        assert!(swap_files(&credentials, &global, &mut accounts, 9).is_err());
+        assert!(
+            swap_files(&credentials, &global, &mut accounts, 9, |id| root
+                .path()
+                .join(id)
+                .to_string_lossy()
+                .into_owned())
+            .is_err()
+        );
         assert_eq!(std::fs::read_to_string(&credentials).unwrap(), "LIVE");
         assert!(!accounts.live_swap);
     }
@@ -1384,7 +1421,10 @@ mod tests {
             ..Default::default()
         };
         let credentials = live.join(".credentials.json");
-        swap_files(&credentials, &global, &mut accounts, 0).unwrap();
+        swap_files(&credentials, &global, &mut accounts, 0, |id| {
+            root.path().join(id).to_string_lossy().into_owned()
+        })
+        .unwrap();
         let installed: Value =
             serde_json::from_slice(&std::fs::read(&credentials).unwrap()).unwrap();
         assert_eq!(installed["claudeAiOauth"]["accessToken"], "WORK");
