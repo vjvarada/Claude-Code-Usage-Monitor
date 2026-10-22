@@ -1432,6 +1432,30 @@ mod tests {
         assert_eq!(installed["mcpOAuth"]["github"]["t"], "gh");
     }
 
+    /// Run with `CLAUDE_JSON_COPY=<path to a copy of ~/.claude.json>` to prove a
+    /// switch leaves MCP servers and every other setting untouched.
+    #[test]
+    #[ignore]
+    fn switching_leaves_a_real_claude_json_intact_apart_from_the_account() {
+        let Some(source) = std::env::var_os("CLAUDE_JSON_COPY") else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let copy = root.path().join(".claude.json");
+        std::fs::copy(source, &copy).unwrap();
+        let before: Value = serde_json::from_slice(&std::fs::read(&copy).unwrap()).unwrap();
+        let account = serde_json::json!({"emailAddress": "switched@example.com"});
+        write_oauth_account(&copy, &account).unwrap();
+        let mut after: Value = serde_json::from_slice(&std::fs::read(&copy).unwrap()).unwrap();
+        assert_eq!(after["oauthAccount"], account);
+        let mut expected = before.clone();
+        expected["oauthAccount"] = account;
+        assert_eq!(after, expected);
+        after["oauthAccount"] = before["oauthAccount"].clone();
+        assert_eq!(after["mcpServers"], before["mcpServers"]);
+        assert_eq!(after["projects"], before["projects"]);
+    }
+
     #[test]
     fn placeholder_names_are_only_account_numbers() {
         assert!(is_placeholder_name("Account 12"));
